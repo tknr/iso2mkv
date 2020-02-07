@@ -1,0 +1,712 @@
+#!/bin/bash
+# iso2mkv
+  VERSION="2011-05-02"
+# Copyright (c) 2006-2011 Petko Yotov (http://5ko.free.fr/)
+# Copyright (c) 2007 Alexander Botero-Lowry (alex at foxybanana period com)
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the "Software"),
+# to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# This software is also a "postcardware", please send me a postcard.
+
+
+
+# iso2mkv -o "./myfilm" -d "../FILM" -T 2 -c "720:416:0:80" -a "en" -s "fr" -t 703
+# try 'iso2mkv -h' for extensive list of options;
+# http://5ko.free.fr/ for examples and older versions
+
+
+function show_help()
+{
+# free letters: fFgGHiIjJKlyY 0123456789
+echo "iso2mkv version $VERSION (experimental)
+Usage: iso2mkv options
+
+-o /output-path/basename (default: ./video )
+-d /path/to/dvd-device/or/iso/or/dir (required, no trailing slash)
+-T Title (dvd title number, default 1)
+-V \"VTS_04*.VOB\" (*work on MPEGs or ripped VOB files instead of whole DVD;
+   no path, path is defined at -d)
+-a \"lang lang ...\" (audio languages to extract, default \"128\", that is
+   normally the original; may be 2 letter code or stream ID: en, 128, 0x81)
+-s \"sub sub ...\" (subtitles to extract, no default)
+   may be 2 letter code: \"en fr\", or stream ID: 0-31)
+-c \"crop parameters\" (video filters, ex. \"704:416:8:80\"; no default)
+-m number (set audio to MP3. VBR (-m [0-9]); CBR (-m 128); no default)
+-v ogg-quality (set audio OGG Vorbis compression, default: 4)
+-b bitrate (video bitrate in kbit/s, default: 900)
+-t filesize (target filesize in MBs; if unset will use video bitrate)
+-U (use on-the-fly audio encoding, no intermediary WAVs)
+
+Advanced options:
+
+-C (crop is OK, don't test)
+-u \"min:sec\" (start time for crop testing; default: \"0:45\")
+-k (keep existing files, don't overwrite : to 'continue' previous conversion)
+-W s (wait \"s\" seconds between phases, don't ask for user keypress; s > 0)
+
+-B \"size_or_time\" (break MKV into pieces, i.e.: \"700m\" or \"00:20:00\")
+
+-A (skip audio extraction)
+-S (skip subtitle extraction)
+-K (skip chapter information extraction)
+-p (skip first pass)
+-P (skip second pass)
+-M (skip merge)
+-L (*do not log actions that have been launched)
+
+-x (additional xvidencopts, ie. \"cartoon[:other]\", default: turbo:pass=%d)
+-X (additional pass2 xvidencopts, default: turbo:pass=2:bitrate=%d)
+   use -x for BOTH passes xvidencopts; use -X for pass2 IF DIFFERENT from -x
+
+-R x/y (picture ratio, ie. 16/9, if Mplayer can't recognize it alone)
+-e pixels (new picture width, height=auto; default: same as cropped original)
+-O vid_out (i.e. 'xv', same as mplayer -vo vid_out, for crop/preview)
+-Q (*use '-nosound' instead of '-oac copy')
+
+-n 19 (lower the CPU priority, default: 19, lowest)
+-N (*no re-nice prefix, use current CPU priority)
+-D (delete temporary WAV files; others are not deleted; see also -U and -E)
+-E (**erase all temporary files)
+-q (silence the beep between steps)
+
+Multizone quality options:
+-w weight (the LQ 'simple zone' correction, 0.01-1.00; default: 0.15)
+-z \"start end\" ('simple zone' HQ start-end time(m:s or h:m:s) or frame(number))
+-Z \"z1=w1 z2=w2 ...\" ('advanced zone': start[=weight], start can be
+   time(min:sec or h:m:s) or frame(number); weight is [0.01-2.00], default 1.
+   example: -Z \"0=0.2 1:32=1 1:40:33=0.15\")
+-r fps (frame rate per second, default: 25.000)
+
+(*)  Not recommended or experimental, you should know what you're doing.
+(**) Not recommended and never tested, idem.
+
+    THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT ANY WARRANTY, etc., etc...
+
+Manual should be avaiable at http://5ko.free.fr/en/iso2mkv.html with examples.
+This program is \"postcardware\" - information at the website.
+"
+exit
+
+}
+
+
+if [[ "$1" == "-help" || "$1" == "--help" ||  "$1" == "" ]]; then show_help
+fi
+
+# Default settings
+# To change these settings, copy them to ~/.mplayer/iso2mkv.conf
+
+# this should be a writeable directory on a filesystem supporting FIFOs:
+FIFODIR="/tmp"
+OUTPUT="./video"
+DEVICE=
+TITLE=1
+AUDIOLANGS="128"
+ALANG_OR_ID="-aid"
+SUBTITLES=
+AUDENC="OGG" # OGG or MP3
+XVIDBTR=900
+OGGQTY=4
+XVIDENCOPTS1="-xvidencopts turbo:pass=1" # cartoon:greyscale
+XVIDENCOPTS2="-xvidencopts turbo:pass=2:bitrate=%d"
+SLEEP=0
+PRE="nice -n 19"
+DELTEMP=0
+
+VOBCAT=
+
+TESTCROP=1  # don't change
+STARTCROP="45"
+
+SUBOK=0
+AUDOK=1
+PASS1=1
+PASS2=1
+MERGE=1
+
+FPS=25
+ZONE_WT=0.15
+
+ZONE_SIMPLE=
+ZONE_ADVANCED=
+ZONE_ADD=
+
+CROP_PARAMS=
+RATIO=
+OVERWRITE=1
+
+SPLIT=
+PASSTHRU=0
+LAMEBTR=
+XVIDENCOPTS_1=
+XVIDENCOPTS_2=
+VO=
+
+CLEANUP=0
+WANT_BEEP=1
+OACCOPY="-oac copy"
+
+NEW_WIDTH=
+
+# where is normalize?
+NORMALIZE=`type -P normalize 2>/dev/null`
+if [ -n "$NORMALIZE" ]; then
+	NORMALIZE=`type -P normalize-audio 2>/dev/null`
+fi
+
+STATSIZE="stat -c %s"
+
+LOGACTIONS=1
+
+# where is dvdxchap?
+XCHAP=`type -P dvdxchap 2>/dev/null`
+
+if [ -f ~/.mplayer/iso2mkv.conf ] ; then
+	source ~/.mplayer/iso2mkv.conf
+fi
+if  [ -f ./iso2mkv.conf ] ; then
+	source ./iso2mkv.conf
+fi
+
+
+
+function between_actions()
+{
+	if [ -f "$OUTDIR/reask" ]; then
+		echo "Found control file $OUTDIR/reask. Changing to interactive mode.";
+		SLEEP=0
+	elif [ -f "$OUTDIR/fullauto" ]; then
+		echo "Found control file $OUTDIR/fullauto. Changing to automatic mode.";
+		SLEEP=4
+	fi
+	if [ "$WANT_BEEP" -eq 1 ]; then
+		printf "\a";
+	fi
+	if [ "$SLEEP" -eq 0 ]; then
+		echo "Press 'Enter' to continue, 'Ctrl+C' to abort, 'q' to stop asking this question.";
+		read TMP;
+
+		if [[ "$TMP" == "q" ]]; then SLEEP=4; fi
+	else
+		echo "Will continue in $SLEEP seconds...";
+		sleep $SLEEP;
+	fi
+}
+
+function testabort()
+{
+	if [ -f "$OUTDIR/abort" ]; then
+		echo "Found control file $OUTDIR/abort. Aborting.";
+		exit;
+	fi
+}
+
+
+function time2frame()
+{
+	local F=1;
+	local FRAMES=
+
+	if [[ -n "$2" ]]; then F=$2; fi
+
+	if [[ "$1" =~ ^([0-9]+):([0-9]+):([0-9\.]+)$ ]]; then
+		FRAMES=$(echo "scale=0; (${BASH_REMATCH[1]}*3600+${BASH_REMATCH[2]}*60+${BASH_REMATCH[3]})*$FPS/1" | bc)
+
+	elif [[ "$1" =~ ^([0-9]+):([0-9\.]+)$ ]]; then
+		FRAMES=$(echo "scale=0; (${BASH_REMATCH[1]}*60+${BASH_REMATCH[2]})*$FPS/1" | bc)
+
+	elif [[ "$1" =~ ^([0-9\.]+)s$ ]]; then
+		FRAMES=$(echo "scale=0; ${BASH_REMATCH[1]}*$FPS/1" | bc)
+
+	elif [[ "$1" =~ ^[0-9]+$ ]]; then
+		FRAMES=$1
+
+	else
+		FRAMES=
+
+	fi
+
+	if [[ -n "$FRAMES" ]]; then
+		if [[ -n "$ZONE_ADD" ]] ; then ZONE_ADD="$ZONE_ADD/$FRAMES,w,$F";
+		else ZONE_ADD="zones=$FRAMES,w,$F";
+		fi
+	fi
+}
+
+function print_precat()
+{
+	if [ -n "$PRECAT" ]; then
+		echo -n "$PRECAT | "
+	fi
+}
+
+function logcommandline()
+{
+	if [ "$LOGACTIONS" -eq 1 ] ; then
+		echo -n "## " >> "$OUTPUT.iso2mkv.log"
+		date >> "$OUTPUT.iso2mkv.log"
+		echo "$1" >> "$OUTPUT.iso2mkv.log"
+	fi
+}
+
+function commandline()
+{
+# commandline dont_wait_for_user_press use_only_CL
+
+	print_precat
+	echo "$CL"
+	if [[ "$1"!="1" ]] ; then between_actions; fi
+	date
+
+#   if [[ -z "$VOBCAT" || "$2"!="1" ]] ; then
+	if [[ -z "$VOBCAT" || "$2" == "1" ]] ; then
+		logcommandline "$CL"
+		$CL
+	else
+		logcommandline "$PRECAT | $CL"
+		$PRECAT | $CL
+	fi
+}
+
+
+# free letters: fFgGHiIjJlyY 0123456789
+while getopts ":o:d:T:a:s:c:m:v:b:t:CASkKLpqEPMDNQUn:x:X:r:z:Z:w:u:W:V:B:R:O:e:" Option
+do
+	case $Option in
+		o	) OUTPUT=$OPTARG; OUTDIR=`dirname "$OUTPUT"`;;
+		d	)
+			if [[ "$OPTARG" =~ ^(.*[^/])/+$ ]] ; then
+				DEVICE="${BASH_REMATCH[1]}"
+			else
+				DEVICE="$OPTARG"
+			fi
+			;;
+		V	) VOBCAT=$OPTARG ;;
+
+		T	) TITLE=$OPTARG;;
+		a	) AUDIOLANGS="$OPTARG";;
+		s	) SUBTITLES="$OPTARG"; SUBOK=1 ;;
+		c	) CROP_PARAMS="$OPTARG" ;;
+		m	) AUDENC="MP3";
+			if [ "$OPTARG" -le 9 ] ; then
+				LAMEBTR="-v -V $OPTARG"
+			else
+				LAMEBTR="-b $OPTARG"
+			fi
+			;;
+		v	) AUDENC="OGG" ; OGGQTY=$OPTARG ;;
+		b	) XVIDBTR=$OPTARG ;;
+		t	) XVIDBTR="-$OPTARG" ;; # XviD only
+		C	) TESTCROP=0 ;;
+		A	) AUDOK=0 ;;
+		S	) SUBOK=0 ;;
+		p	) PASS1=0 ;;
+		P	) PASS2=0 ;;
+		M	) MERGE=0 ;;
+		n	) PRE="nice -n $OPTARG" ;;
+		N	) PRE="" ;;
+		x	) XVIDENCOPTS_1=":$OPTARG"
+			if [ -z "$XVIDENCOPTS_2" ] ; then
+				XVIDENCOPTS_2=":$OPTARG"
+			fi
+			;;
+		X	) XVIDENCOPTS_2=":$OPTARG";;
+
+		r	) FPS=$OPTARG;;
+		z	) ZONE_SIMPLE=$OPTARG;;
+		Z	) ZONE_ADVANCED=$OPTARG;;
+		w	) ZONE_WT=$OPTARG;;
+		u	) STARTCROP=$OPTARG;;
+		W	) SLEEP=$OPTARG;;
+		D	) DELTEMP=1;;
+		k	) OVERWRITE=0;;
+		B	) SPLIT="--split $OPTARG";;
+		U	) PASSTHRU=1;;
+		R	) RATIO="dsize=$OPTARG";;
+		O	) VO=$OPTARG;;
+		e	) NEW_WIDTH=$OPTARG;;
+		q	) WANT_BEEP=0;;
+		E	) CLEANUP=1;;
+		Q	) OACCOPY="-nosound";;
+		K	) XCHAP=
+				;;
+		L	) LOGACTIONS=0;;
+
+
+		h | *	) show_help
+				;;
+	esac
+done
+shift $(($OPTIND - 1))
+
+
+
+if [ -z "$DEVICE" ] ; then
+	echo "Device not set."; echo ; echo; show_help
+	exit
+fi
+
+if [ ! -f "$DEVICE" ] ; then
+	if [ ! -d "$DEVICE" ]; then
+		if [ ! -b "$DEVICE" ]; then
+			echo "'$DEVICE' is not block-device/ISO-file/directory."; echo ; echo; show_help
+		fi
+	fi
+fi
+
+if [ -z "$VOBCAT" ];then
+	DVD_OR_FILES="-dvd-device $DEVICE dvd://$TITLE"
+	PRECAT=
+else
+	DVD_OR_FILES="-"
+	PRECAT="cat $DEVICE/$VOBCAT"
+fi
+
+if [ "$STARTCROP" -eq 0 ] ; then SSCROP=""; else SSCROP="-ss $STARTCROP"; fi
+if [ -n "$VO" ] ; then
+	VO="-vo $VO"
+fi
+
+if [ -n "$RATIO" ] ; then
+	VF_RATIO="$RATIO,";
+	VF_FILTERS="-vf $RATIO"; #if ratio given but no crop
+fi
+
+if [ -z "$CROP_PARAMS" ] ; then
+	if [ "$TESTCROP" -eq 1 ] ; then
+		echo "Starting mplayer to detect the cropping..."
+		CL="$PRE mplayer -v $VO $SSCROP -alang en -vf ${VF_RATIO}cropdetect $DVD_OR_FILES"
+		commandline 1
+
+		echo; echo; echo; echo; echo;
+		echo "Check out the cropdetect parameters and the subtitle indexes."
+		echo "Try iso2mkv -h for help."
+		exit
+	fi
+fi
+
+M='^([0-9]{1,3}):([0-9]{1,3}):[0-9]{1,3}:[0-9]{1,3}$'
+if [[ "$CROP_PARAMS" =~ $M ]] ; then
+	if [ -z "$NEW_WIDTH" ] ; then
+		NEW_WIDTH=${BASH_REMATCH[1]}
+		NEW_HEIGHT="-10"
+	elif [ "$NEW_WIDTH" -lt "0" ] ; then
+    NEW_HEIGHT=${BASH_REMATCH[2]}
+	fi
+	VF_FILTERS="-vf ${VF_RATIO}crop=$CROP_PARAMS,scale=${NEW_WIDTH}:${NEW_HEIGHT}";
+fi
+
+XVIDENCOPTS1="$XVIDENCOPTS1$XVIDENCOPTS_1";
+XVIDENCOPTS2="$XVIDENCOPTS2$XVIDENCOPTS_2";
+
+if [[ -n "$ZONE_ADVANCED" ]]; then
+	for i in $ZONE_ADVANCED ; do
+		if [[ "$i" =~ ^([0-9:\.]+s?)=([0-9\.]+)$ ]]; then
+			time2frame ${BASH_REMATCH[1]} ${BASH_REMATCH[2]};
+		else
+			time2frame $i 1;
+		fi
+	done
+elif [[ -n "$ZONE_SIMPLE" ]]; then
+	time2frame 0 $ZONE_WT;
+	CNT=1;
+	for i in $ZONE_SIMPLE  ; do
+		if [ "$CNT" -eq 1 ]; then
+			time2frame $i 1;
+			let CNT="$CNT+1";
+		else
+			time2frame $i $ZONE_WT;
+			break;
+		fi
+	done
+fi
+
+if [[ -n "$ZONE_ADD" ]] ; then
+	XVIDENCOPTS1="$XVIDENCOPTS1:$ZONE_ADD"
+	XVIDENCOPTS2="$XVIDENCOPTS2:$ZONE_ADD"
+fi
+
+mkdir -p "$OUTDIR"
+
+if [ "$TESTCROP" -eq 1 ] ; then
+	echo "Starting mplayer to test the cropping..."
+	CL="$PRE mplayer -v $VO $SSCROP $VF_FILTERS $DVD_OR_FILES"
+	commandline 1
+
+	echo "If you're not happy with the cropping, press Ctrl+C."; echo
+	echo "You may do a 'cropdetect' with the command:"
+	print_precat
+	echo "$PRE mplayer -v $VO $SSCROP -vf cropdetect $DVD_OR_FILES"
+	between_actions
+else
+	echo "Skipping the cropping test."
+fi
+
+
+
+
+# Main process, buckle up your seat belts...
+
+ADDSIZE=0
+
+testabort
+
+# chapter extraction (do it first, we have the time to edit the file
+# and write the real titles of chapters in all words)
+if [[ ! -z "$XCHAP" && -z "$VOBCAT" && ! -f "$OUTPUT.chapters.txt" ]] ; then
+	CL="dvdxchap -t $TITLE $DEVICE"
+	echo "Extracting chapters..."; echo
+	echo "$CL > $OUTPUT.chapters.txt"
+	between_actions
+	logcommandline "$CL > $OUTPUT.chapters.txt"
+	$CL > "$OUTPUT.chapters.txt"
+
+else
+	echo "Skipping chapter extraction.";
+fi
+if [ -f "$OUTPUT.chapters.txt" ] ; 	then
+	let ADDSIZE="ADDSIZE + `$STATSIZE $OUTPUT.chapters.txt`"
+fi
+
+testabort
+
+if [ "$SUBOK" -eq 1 ] ; then
+	if [[ "$OVERWRITE" == "0" && -f "$OUTPUT.sub" ]] ;	then
+		echo "Subtitles seem to exist, skipping"
+	else
+		i=0;
+		for SID in $SUBTITLES ; do
+			case "$SID" in
+				[a-z][a-z]	) TMP="-slang" ;;
+				* )  TMP="-sid" ;;
+			esac
+
+			CL="$PRE mencoder $OACCOPY -vobsubout $OUTPUT -ovc frameno -o /dev/null $TMP $SID -vobsuboutindex $i $DVD_OR_FILES"
+			echo; echo; echo "Extracting subtitle $SID..."; echo; echo
+			commandline
+
+			let "i+=1" ;
+		done
+	fi
+else
+	echo "Skipping subtitles processing."
+fi
+
+if [ -f $OUTPUT.sub ]; then
+	let ADDSIZE="`$STATSIZE $OUTPUT.sub` + `$STATSIZE $OUTPUT.idx`"
+fi
+
+testabort
+
+
+if [[ "$OACCOPY" == "-oac copy" ]] ; then
+	for AID in $AUDIOLANGS ; do # for 2nd pass AC3 output (TODO)
+		case "$AID" in
+			[a-z][a-z]	) AUDIO1="-alang $AID" ;;
+			* ) AUDIO1="-aid $AID" ;;
+		esac
+		break
+	done
+	OACCOPY="$OACCOPY $AUDIO1"
+fi
+
+
+AUDIOFILES=""
+for AID in $AUDIOLANGS ; do
+
+	if [ "$AUDOK" -eq 1 ] ; then
+		case "$AID" in
+			[a-z][a-z]	) ALANG_OR_ID="-alang" ;;
+			* ) ALANG_OR_ID="-aid" ;;
+		esac
+
+
+
+		if [ "$PASSTHRU" -eq 0 ] ; then  # WAV>Normalize>Compress
+
+			if [[ "$AUDENC" = "OGG" ]]
+			then
+				CL1="$PRE oggenc -q $OGGQTY -o $OUTPUT.$AID.wav.$AUDENC $OUTPUT.$AID.wav"
+			else
+				CL1="$PRE lame -h $LAMEBTR $OUTPUT.$AID.wav $OUTPUT.$AID.wav.$AUDENC"
+			fi
+			CL="$PRE mplayer $ALANG_OR_ID $AID -vo null -vc dummy -ao pcm:file=$OUTPUT.$AID.wav $DVD_OR_FILES"
+
+			if [[ "$OVERWRITE" == "0" && -f "$OUTPUT.$AID.wav" ]] ; then
+				echo "File $OUTPUT.$AID.wav seems to exist. Skipping."
+			else
+
+				echo; echo; echo "Extracting audio stream '$AID'..."; echo; echo
+				commandline
+
+				if [[ -n "$NORMALIZE" ]] ; then
+					CL="$PRE $NORMALIZE $OUTPUT.$AID.wav"
+					echo; echo; echo "Normalizing audio...";
+					commandline 0 1
+				fi
+			fi
+			WAVFILES="$WAVFILES $OUTPUT.$AID.wav"
+
+			if [[ "$OVERWRITE" == "0" && -f "$OUTPUT.$AID.wav.$AUDENC" ]] ;	then
+				echo "File $OUTPUT.$AID.wav.$AUDENC seems to exist. Skipping."
+			else
+
+				echo; echo; echo "Converting stream '$AID' to $AUDENC..."; echo;
+				CL="$CL1"
+				commandline
+			fi
+
+			if [ "$DELTEMP" -eq 1 ]; then rm -f $OUTPUT.$AID.wav; fi
+
+		else # direct (FIFO) compression
+
+			if [[ "$OVERWRITE" == "0" && -f "$OUTPUT.$AID.wav.$AUDENC" ]] ;	then
+				echo "File $OUTPUT.$AID.wav.$AUDENC seems to exist. Skipping."
+			else
+				if [[ "$AUDENC" = "OGG" ]]
+				then
+					CL1="$PRE oggenc -q $OGGQTY -o $OUTPUT.$AID.wav.$AUDENC -"
+				else
+					CL1="$PRE lame -h $LAMEBTR - $OUTPUT.$AID.wav.$AUDENC"
+				fi
+
+				# soon it will be possible to fork the passes
+				FIFO="$FIFODIR/iso2mkv.fifo.$PPID.$AID.wav";
+
+				CL0="$PRE mplayer -really-quiet $ALANG_OR_ID $AID -vo null -vc dummy -ao pcm:file=$FIFO $DVD_OR_FILES"
+
+				echo; echo; echo "Extracting and compressing audio stream '$AID'..."; echo; echo
+				echo "$CL1 < $FIFO &"
+				print_precat
+				echo "$CL0 &"
+
+				between_actions
+				date
+
+				if [ -f "$FIFO" ]; then rm -rf $FIFO; fi
+				mkfifo $FIFO
+				logcommandline "$CL1 < $FIFO &"
+				$CL1 < "$FIFO" &
+				if [ -n "$PRECAT" ]; then
+					logcommandline "$PRECAT | $CL0 &"
+					$PRECAT | $CL0 &
+				else
+					logcommandline "$CL0 &"
+					$CL0  &
+				fi
+
+				wait
+				rm -f $FIFO
+			fi
+		fi
+	else
+		echo "Skipping audio $AID processing."
+ 	fi
+
+	AUDIOFILES="$AUDIOFILES $OUTPUT.$AID.wav.$AUDENC"
+
+	if [ -f "$OUTPUT.$AID.wav.$AUDENC" ] ; then
+		let ADDSIZE="ADDSIZE + `$STATSIZE $OUTPUT.$AID.wav.$AUDENC`"
+	fi
+	testabort
+done
+
+
+
+
+
+if [ "$XVIDBTR" -lt 0 ] ; then
+	let XVIDBTR="$XVIDBTR*1024+$ADDSIZE/1024"
+	# TODO: XviD auto-calculates the size in kB if negative; for other codecs:
+	# kbits = (target_Mb - sound_Mb) * 1024 * 1024 / length_in_secs * 8 / 1000
+fi
+
+# printf doesn't work...
+if [[ "$XVIDENCOPTS1" =~ ^(.*)%d(.*)$ ]]; then
+	XVIDENCOPTS1="${BASH_REMATCH[1]}$XVIDBTR${BASH_REMATCH[2]}"
+fi
+if [[ "$XVIDENCOPTS2" =~ ^(.*)%d(.*)$ ]]; then
+	XVIDENCOPTS2="${BASH_REMATCH[1]}$XVIDBTR${BASH_REMATCH[2]}"
+fi
+
+echo "XVIDENCOPTS1 = $XVIDENCOPTS1"
+echo "XVIDENCOPTS2 = $XVIDENCOPTS2"
+
+testabort
+
+if [[ "$OVERWRITE" == "0" && -f "$OUTPUT.avi" ]] ;	then
+	echo "File $OUTPUT.avi seems to exist. Skipping PASS 1 and PASS 2."
+else
+
+	if [ "$PASS1" -eq 1 ] ; then
+		CL="$PRE mencoder -passlogfile $OUTPUT.pass1.log $VF_FILTERS $OACCOPY -noautosub -ovc xvid $XVIDENCOPTS1 -o /dev/null $DVD_OR_FILES"
+		echo; echo; echo "Starting first pass encoding, will take a long time..."
+		commandline
+	else
+		echo "Skipping first pass processing."
+	fi
+
+	testabort
+
+	if [ "$PASS2" -eq 1 ] ; then
+		CL="$PRE mencoder -passlogfile $OUTPUT.pass1.log $VF_FILTERS $OACCOPY -noautosub -ovc xvid $XVIDENCOPTS2 -o $OUTPUT.avi $DVD_OR_FILES"
+		echo; echo; echo "Starting second pass encoding, will take an even longer time..."
+		commandline
+	else
+		echo "Skipping second pass processing."
+	fi
+	testabort
+
+fi
+
+
+
+if [[ "$OVERWRITE" == "0" && -f "$OUTPUT.mkv" ]] ;	then
+	echo "File $OUTPUT.mkv seems to exist. Skipping 'mkvmerge'."
+
+elif [ "$MERGE" -eq 1 ] ; then
+
+	if [ -f "$OUTPUT.chapters.txt" ] ; then
+		CHAPTERS="--chapters $OUTPUT.chapters.txt"
+	else
+		CHAPTERS=
+	fi
+
+		CL="$PRE mkvmerge $SPLIT -o $OUTPUT.mkv --noaudio $OUTPUT.avi $AUDIOFILES $CHAPTERS"
+		echo; echo; echo "Merging matroshka file...";
+		commandline 0 1
+else
+	echo "Skipping mkvmerge processing."
+fi
+
+
+if [ "$CLEANUP" -eq 1 ]; then
+	CL="$PRE rm -rf $OUTPUT.avi $AUDIOFILES $WAVFILES $OUTPUT.chapters.txt $OUTPUT.iso2mkv.log"
+	echo; echo; echo "Cleaning up working files..."
+	commandline 0 1
+else
+	echo "Skipping cleanup phase."
+fi
+
+
+date
+if [ "$WANT_BEEP" -eq 1 ]; then printf "\a"; fi
+echo "Have a nice day."
+
+
